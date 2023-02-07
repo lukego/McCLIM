@@ -1363,15 +1363,12 @@ if INVOKE-CALLBACK is given."))
 
 (defun rewrite-event-for-grab (grabber event)
   (multiple-value-bind (nx ny)
-      (multiple-value-call #'untransform-position
-        (sheet-delta-transformation grabber nil) ;; assumes this is the graft's coordinate system..
-        (values (pointer-event-native-graft-x event)
-                (pointer-event-native-graft-y event)))
+      (do-get-pointer-position grabber event)
     (with-slots (sheet x y) event
       (setf sheet grabber
             x nx
-            y ny)))
-  event)
+            y ny))
+    event))
 
 (defun popup-compute-spaces (pane graft)
   (with-bounding-rectangle* (x0 top x1 bottom) (sheet-region pane)
@@ -1421,15 +1418,12 @@ if INVOKE-CALLBACK is given."))
             (multiple-value-call #'values
               (transform-position (sheet-delta-transformation parent nil) cx0 cy0)
               (transform-position (sheet-delta-transformation parent nil) cx1 cy1))
-          ;; Note: This :suggested-width/height business is really a silly hack
-          ;;       which I could have easily worked around without adding kludges
-          ;;       to the scroller-pane..
           (let* ((topmost-pane (if scroll-p
-                                   ;; TODO investigate whether suggested-* arguments actually have an effect
-                                   (scrolling (:scroll-bar :vertical
-                                               :suggested-height height
-                                               :suggested-width (if scroll-p (+ 30 (bounding-rectangle-width list-pane))))
-                                     list-pane)
+                                   (let ((w (bounding-rectangle-width list-pane)))
+                                     (scrolling (:scroll-bar :vertical
+                                                 :height height
+                                                 :width w)
+                                       list-pane))
                                    list-pane))
                  (topmost-pane    (outlining (:thickness 1) topmost-pane))
                  (composed-height (space-requirement-height (compose-space topmost-pane :width (- x1 x0) :height height)))
@@ -1760,11 +1754,8 @@ it in a layout between two panes that are to be resizeable.  E.g.:
       ;; child. Dividing by the combined size of left and right gives
       ;; the ratio the user is going for.
       (flet ((left-pointer-position ()
-               (untransform-position
-                (sheet-delta-transformation
-                 (sheet-mirrored-ancestor (box-client-pane left)) nil)
-                (pointer-event-native-graft-x event)
-                (pointer-event-native-graft-y event))))
+               (let ((sheet (sheet-mirrored-ancestor (box-client-pane left))))
+                 (do-get-pointer-position sheet event))))
         (let ((position (- (ecase orientation
                              (:vertical (left-pointer-position))
                              (:horizontal (nth-value 1 (left-pointer-position))))

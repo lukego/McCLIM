@@ -360,9 +360,7 @@
 
 (defmethod get-frame-pane ((frame application-frame) pane-name)
   (let ((pane (find-pane-named frame pane-name)))
-    (if (typep pane 'clim-stream-pane)
-        pane
-        nil)))
+    (find-pane-of-type pane 'clim-stream-pane)))
 
 (defmethod find-pane-named ((frame application-frame) pane-name)
   (map-over-sheets #'(lambda (p)
@@ -412,43 +410,59 @@
   (declare (ignore pane force-p))
   nil)
 
-(defmethod redisplay-frame-pane :around ((frame application-frame) pane
-                                         &key force-p)
+;;; Redisplaying from scratch involves clearing old output record history,
+;;; recording the new output record history, updating the window dimensiosn
+;;; and repainting the sheet. We don't use window-clear becase it eagerly
+;;; resets the window dimensions and restores the scroll bars. Further
+;;; improvements are possible - for example erase only the back buffer and
+;;; blit it onto the window - this will avoid a flicker from window-erase.
+(defgeneric do-redisplay-pane (pane cont clearp)
+  (:method ((pane pane) cont clearp)
+    (with-output-buffered (pane)
+      (when clearp
+        (window-clear pane))
+      (funcall cont)))
+  (:method ((pane clim-stream-pane) cont clearp)
+    (flet ((erase-pane ()
+             (stream-close-text-output-record pane)
+             (clear-output-record (stream-output-history pane))
+             (when-let ((cursor (stream-text-cursor pane)))
+               (setf (cursor-position cursor)
+                     (stream-cursor-initial-position pane)))
+             (setf (stream-width pane) 0)
+             (setf (stream-height pane) 0)))
+      (with-output-buffered (pane)
+        (with-output-recording-options (pane :record t :draw nil)
+          (when clearp
+            (erase-pane))
+          (funcall cont))
+        (window-erase-viewport pane)
+        (change-space-requirements pane)
+        (stream-replay pane)))))
+
+(defmethod redisplay-frame-pane :around
+    ((frame application-frame) pane &key force-p)
   (let ((pane-object (if (typep pane 'pane)
                          pane
                          (find-pane-named frame pane))))
     (restart-case
         (multiple-value-bind (redisplayp clearp)
             (pane-needs-redisplay pane-object)
-          (when force-p
-            (setq redisplayp (or redisplayp t)
-                  clearp t))
-          (when redisplayp
-            ;; FIXME the pane may be resized twice: once when it is cleared, and
-            ;; the second time after drawing. CHANGING-SPACE-REQUIREMENTS can't
-            ;; be used here because it inhibits all resizes, so it also affects
-            ;; local drawing context from WITH-OUTPUT-TO-DRAWING-STREAM that may
-            ;; rely on eagerly changed size. -- jd 2022-07-05
-            (with-output-buffered (pane-object)
-              (when-let ((highlited (frame-highlited-presentation frame)))
-                (highlight-presentation-1 (car highlited)
-                                          (cdr highlited)
-                                          :unhighlight)
-                (setf (frame-highlited-presentation frame) nil))
-              (when clearp
-                (window-clear pane-object))
-              (call-next-method))
+          (when (or force-p clearp)
+            (setf (frame-highlited-presentation frame) nil))
+          (when (or force-p redisplayp)
+            (do-redisplay-pane pane-object #'call-next-method clearp)
             (unless (or (eq redisplayp :command-loop) (eq redisplayp :no-clear))
               (setf (pane-needs-redisplay pane-object) nil))))
       (clear-pane-try-again ()
-       :report "Clear the output history of the pane and reattempt forceful redisplay."
-       (window-clear pane)
-       (redisplay-frame-pane frame pane :force-p t))
+        :report "Clear the output history of the pane and reattempt forceful redisplay."
+        (window-clear pane)
+        (redisplay-frame-pane frame pane :force-p t))
       (clear-pane ()
-       :report "Clear the output history of the pane, but don't redisplay."
-       (window-clear pane))
+        :report "Clear the output history of the pane, but don't redisplay."
+        (window-clear pane))
       (skip-redisplay ()
-       :report "Skip this redisplay."))))
+        :report "Skip this redisplay."))))
 
 (defmethod run-frame-top-level ((frame application-frame)
                                 &key &allow-other-keys)
@@ -632,6 +646,15 @@
                                                  :sheet sheet
                                                  :frame frame
                                                  :command command)))))
+
+(defun schedule-command (frame command delay)
+  (let* ((sheet (frame-top-level-sheet frame))
+         (queue (sheet-event-queue sheet))
+         (event (make-instance 'execute-command-event
+                               :sheet sheet
+                               :frame frame
+                               :command command)))
+    (schedule-event-queue queue event delay)))
 
 (defmethod execute-frame-command ((frame application-frame) command)
   (check-type command cons)

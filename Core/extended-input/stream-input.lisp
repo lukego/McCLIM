@@ -24,14 +24,6 @@
 ;;; here to allow sharing the input buffer between different streams.
 (defvar *input-buffer* nil)
 
-;;; X11 returns #\Return where we want to see #\Newline at the stream-read-char
-;;; level.  Dunno if this is the right place to do the transformation... --moore
-(defun char-for-read (char)
-  (check-type char (or character null))
-  (case char
-    (#\return #\newline)
-    (otherwise char)))
-
 (defun event-char (event)
   (let ((modifiers (event-modifier-state event)))
     (when (or (zerop modifiers)
@@ -108,6 +100,15 @@
         (*pointer-button-press-handler* pointer-button-press-handler)
         (input-buffer (stream-input-buffer stream)))
     (flet ((process-gesture (raw-gesture)
+             ;; XXX the specification of the POINTER-BUTTON-PRESS-HANDLER is
+             ;; bogus - translators may be accelerated by other gesture types
+             ;; (i.e :POINTER-BUTTON-RELEASE, :POINTER-MOTION or :TIMER).
+             ;;
+             ;; FIXME we can pass all gestures to POINTER-BUTTON-PRESS-HANDLER
+             ;; or ignore it wholesale and invoke the input-context function
+             ;; directly from INPUT-WAIT-HANDLER. Passing all gestures here
+             ;; has a drawback that only keyboard and pointer gestures are
+             ;; available in the input buffer so i.e :TIMER will be ignored.
              (when (and pointer-button-press-handler
                         (typep raw-gesture '(or pointer-button-press-event
                                                 pointer-scroll-event)))
@@ -255,20 +256,6 @@
 
 ;;; 22.2 Extended Input Streams
 
-;;; 22.2.2 Extended Input Stream Conditions
-(defvar *abort-gestures* '(:abort))
-(defvar *accelerator-gestures* nil)
-
-(define-condition abort-gesture (condition)
-  ((event :reader abort-gesture-event :initarg :event)))
-
-(define-condition accelerator-gesture (condition)
-  ((event :reader accelerator-gesture-event :initarg :event)
-   (numeric-argument :reader accelerator-gesture-numeric-argument
-                     :initarg :numeric-argument
-                     :initform 1)))
-
-;;;
 (defclass dead-key-merging-mixin ()
   ((state :initform *dead-key-table*)
    ;; Avoid name clash with standard-extended-input-stream.
@@ -370,24 +357,17 @@ keys read."))
               ((abort-gesture-p gesture)
                (signal 'abort-gesture :event gesture))
               ((accelerator-gesture-p gesture)
-               (signal 'accelerator-gesture :event gesture))
+               (signal 'accelerator-gesture :event gesture
+                                            :numeric-argument (numeric-argument stream)))
               (t
                (return-from stream-read-gesture gesture))))))))
 
 (defmethod stream-pointer-position ((stream standard-extended-input-stream)
-                                    &key (pointer
-                                          (port-pointer (port stream))))
-  (multiple-value-bind (x y)
-      (pointer-position pointer)
-    (let ((graft (graft (port pointer))))
-      (untransform-position (sheet-delta-transformation stream graft) x y))))
+                                    &key (pointer (port-pointer (port stream))))
+  (sheet-pointer-position stream pointer))
 
 (defmethod* (setf stream-pointer-position) (x y (stream standard-extended-input-stream))
-  (let ((graft (graft stream))
-        (pointer (port-pointer (port stream))))
-    (multiple-value-bind (x y)
-        (transform-position (sheet-delta-transformation stream graft) x y)
-      (setf (pointer-position pointer) (values x y)))))
+  (set-sheet-pointer-position stream (port-pointer (port stream)) x y))
 
 ;;; These functions are for convenience - seos is not a character stream so it
 ;;; is not obligated to implement these. Reading a character discards all

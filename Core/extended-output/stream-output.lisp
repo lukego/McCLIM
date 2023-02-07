@@ -30,12 +30,20 @@
    (eol :initarg :end-of-line-action :accessor stream-end-of-line-action)
    (eop :initarg :end-of-page-action :accessor stream-end-of-page-action)
    (view :initarg :default-view :accessor stream-default-view)
-   (baseline :initform 0 :reader stream-baseline)
-   (height :accessor stream-cursor-height))
+   (baseline :initform 0 :reader stream-baseline))
   (:default-initargs
    :foreground +black+ :background +white+ :text-style *default-text-style*
    :vertical-spacing 2 :end-of-page-action :scroll :end-of-line-action :wrap
    :default-view +textual-view+))
+
+(defmethod stream-cursor-height ((sheet sheet))
+  (text-style-height (medium-text-style sheet) sheet))
+
+(defmethod stream-cursor-height ((sheet standard-extended-output-stream))
+  (cursor-height (stream-text-cursor sheet)))
+
+(defun (setf stream-cursor-height) (value stream)
+  (setf (cursor-height (stream-text-cursor stream)) value))
 
 (defmethod stream-force-output :after
     ((stream standard-extended-output-stream))
@@ -56,20 +64,20 @@
           (make-instance 'standard-text-cursor
                          :sheet stream
                          :x-position x-start
-                         :y-position y-start)))
-  (setf (cursor-active (stream-text-cursor stream)) t))
-
-(defmethod slot-unbound (class (stream standard-extended-output-stream) (slot (eql 'height)))
-  (declare (ignore class))
-  (setf (stream-cursor-height stream)
-        (text-style-height (stream-text-style stream) stream)))
+                         :y-position y-start
+                         :width 4
+                         :height (text-style-height (stream-text-style stream) stream)))))
 
 (defmethod stream-cursor-position ((stream standard-extended-output-stream))
   (cursor-position (stream-text-cursor stream)))
 
 (defmethod* (setf stream-cursor-position)
     (x y (stream standard-extended-output-stream))
-  (setf (cursor-position (stream-text-cursor stream)) (values x y)))
+  (let ((cursor (stream-text-cursor stream)))
+    (setf (cursor-position cursor) (values x y))
+    (when (and (cursor-active cursor)
+               (output-recording-stream-p stream))
+      (stream-close-text-output-record (cursor-sheet cursor)))))
 
 (defmethod stream-set-cursor-position ((stream standard-extended-output-stream) x y)
   (setf (stream-cursor-position stream) (values x y)))
@@ -332,14 +340,21 @@ produces no more than one line of output i.e., doesn't wrap."))
     (declare (ignore y))
     (= x (stream-cursor-initial-position stream))))
 
+(defmethod beep (&optional medium)
+  (if medium
+      (medium-beep medium)
+      (when (sheetp *standard-output*)
+        (medium-beep (sheet-medium *standard-output*)))))
+
 (defmacro with-room-for-graphics ((&optional (stream t)
-                                             &rest arguments
-                                             &key (first-quadrant t)
-                                             height
-                                             (move-cursor t)
-                                             (record-type ''standard-sequence-output-record))
+                                   &rest arguments
+                                   &key (first-quadrant t)
+                                     width
+                                     height
+                                     (move-cursor t)
+                                     (record-type ''standard-sequence-output-record))
                                   &body body)
-  (declare (ignore first-quadrant height move-cursor record-type))
+  (declare (ignore first-quadrant width height move-cursor record-type))
   (let ((cont (gensym "CONT.")))
     (with-stream-designator (stream '*standard-output*)
       `(labels ((,cont (,stream)
@@ -347,11 +362,51 @@ produces no more than one line of output i.e., doesn't wrap."))
          (declare (dynamic-extent #',cont))
          (invoke-with-room-for-graphics #',cont ,stream ,@arguments)))))
 
-(defmethod beep (&optional medium)
-  (if medium
-      (medium-beep medium)
-      (when (sheetp *standard-output*)
-        (medium-beep (sheet-medium *standard-output*)))))
+;;; This fallback implementation is meant to work on any sheet with the output
+;;; protocol.
+(defmethod invoke-with-room-for-graphics (cont stream
+                                          &key (first-quadrant t)
+                                               (width 100)
+                                               (height 100)
+                                               (move-cursor t)
+                                               (record-type nil))
+  (declare (ignore record-type))
+  (with-sheet-medium (medium stream)
+    (multiple-value-bind (cx cy) (transform-position (medium-transformation medium) 0 0)
+      (multiple-value-bind (cy* transformation)
+          (if (not first-quadrant)
+              (values cy +identity-transformation+)
+              (values (+ cy height)
+                      (make-scaling-transformation 1 -1)))
+        (letf (((medium-transformation medium)
+                (compose-transformation-with-translation transformation cx cy*)))
+          (funcall cont stream)))
+      (if move-cursor
+          (values (+ cx width) cy)
+          (values cx cy)))))
+
+(defmethod invoke-with-room-for-graphics (cont (stream extended-output-stream)
+                                          &key (first-quadrant t)
+                                            (width (stream-character-width stream #\M))
+                                            (height (stream-cursor-height stream))
+                                            (move-cursor t)
+                                            (record-type nil))
+  (declare (ignore record-type))
+  (with-sheet-medium (medium stream)
+    (multiple-value-bind (cx cy) (stream-cursor-position stream)
+      (multiple-value-bind (cy* transformation)
+          (if (not first-quadrant)
+              (values cy +identity-transformation+)
+              (values (+ cy (stream-baseline stream))
+                      (make-scaling-transformation 1 -1)))
+        (letf (((medium-transformation medium)
+                (compose-transformation-with-translation transformation cx cy*)))
+          (funcall cont stream)))
+      (maxf (stream-cursor-height stream) height)
+      (setf (stream-cursor-position stream)
+            (if move-cursor
+                (values (+ cx width) cy)
+                (values cx cy))))))
 
 (defmethod invoke-with-local-coordinates ((medium extended-output-stream) cont x y)
   ;; For now we do as real CLIM does.

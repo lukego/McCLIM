@@ -86,16 +86,9 @@
 
 ;;; XXX :button code -> :button (decode-x-button-code code)
 ;;;
-;;; Only button and keypress events get a :code keyword argument! For
-;;; mouse button events, one should use decode-x-button-code;
-;;; otherwise one needs to look at the state argument to get the
-;;; current button state. The CLIM spec says that pointer motion
-;;; events are a subclass of pointer-event, which is reasonable, but
-;;; unfortunately they use the same button slot, whose value should
-;;; only be a single button. Yet pointer-button-state can return the
-;;; logical or of the button values... aaargh. For now I'll
-;;; canonicalize the value going into the button slot and think about
-;;; adding a pointer-event-buttons slot to pointer events. -- moore
+;;; Only button and keypress events get a :code keyword argument! For mouse
+;;; button events, one should use decode-x-button-code; otherwise one needs to
+;;; look at the state argument to get the current button state. -- moore
 
 (defvar *clx-port*)
 (defvar *wait-function*)
@@ -114,16 +107,14 @@
     (case event-key
       ((:key-press :key-release)
        (multiple-value-bind (keyname modifier-state keysym-name)
-           (x-event-to-key-name-and-modifiers *clx-port*
-                                              event-key code state)
+           (clim-xcommon:x-event-to-key-name-and-modifiers *clx-port*
+                                                           event-key code state)
          (make-instance (if (eq event-key :key-press)
                             'key-press-event
                             'key-release-event)
                         :key-name keysym-name
                         :key-character (and (characterp keyname) keyname)
                         :x x :y y
-                        :graft-x root-x
-                        :graft-y root-y
                         :sheet sheet
                         :modifier-state modifier-state :timestamp time)))
       ((:button-press :button-release)
@@ -139,8 +130,6 @@
                (make-instance 'climi::pointer-scroll-event
                               :pointer (port-pointer *clx-port*)
                               :button button :x x :y y
-                              :graft-x root-x
-                              :graft-y root-y
                               :sheet sheet
                               :modifier-state modifier-state
                               :delta-x (case button
@@ -157,8 +146,6 @@
                                 'pointer-button-release-event)
                             :pointer (port-pointer *clx-port*)
                             :button button :x x :y y
-                            :graft-x root-x
-                            :graft-y root-y
                             :sheet sheet :modifier-state modifier-state
                             :timestamp time))))
       ((:leave-notify :enter-notify)
@@ -187,10 +174,8 @@
                                            (:grab 'pointer-grab-enter-event)
                                            (:ungrab 'pointer-ungrab-enter-event)
                                            (t 'pointer-enter-event))))
-                        :pointer (port-pointer *clx-port*) :button code
+                        :pointer (port-pointer *clx-port*)
                         :x x :y y
-                        :graft-x root-x
-                        :graft-y root-y
                         :sheet sheet
                         :modifier-state (clim-xcommon:x-event-state-modifiers
                                          *clx-port* state)
@@ -214,14 +199,14 @@
                                               (clx-port-window *clx-port*))
                 (make-instance 'window-configuration-event
                                :sheet sheet
-                               :x x
-                               :y y
-                               :width width :height height)))
+                               :region (make-bounding-rectangle
+                                        x y (+ x width) (+ y height)))))
              (t
               ;; nothing special here
               (make-instance 'window-configuration-event
                              :sheet sheet
-                             :x x :y y :width width :height height))))
+                             :region (make-bounding-rectangle
+                                      x y (+ x width) (+ y height))))))
       (:map-notify
        (if (and (typep sheet 'top-level-sheet-pane)
                 (eq (frame-state (pane-frame sheet)) :shrunk))
@@ -237,10 +222,8 @@
        (let ((modifier-state (clim-xcommon:x-event-state-modifiers *clx-port*
                                                                    state)))
          (make-instance 'pointer-motion-event
-                        :pointer (port-pointer *clx-port*) :button code
+                        :pointer (port-pointer *clx-port*)
                         :x x :y y
-                        :graft-x root-x
-                        :graft-y root-y
                         :sheet sheet
                         :modifier-state modifier-state
                         :timestamp time)))
@@ -348,53 +331,19 @@
 (defconstant +wheel-down-mask+ #x1000)
 
 (defmethod pointer-button-state ((pointer clx-basic-pointer))
+  (port-button-state (port pointer)))
+
+(defun port-button-state (port)
   (multiple-value-bind (x y same-screen-p child mask)
-      (xlib:query-pointer (clx-port-window (port pointer)))
+      (xlib:query-pointer (clx-port-window port))
     (declare (ignore x y same-screen-p child))
     (ldb (byte 5 8) mask)))
-
-(defun button-from-state (mask)
-  ;; In button events we don't want to see more than one button,
-  ;; according to the spec, so pick a canonical ordering. :P The mask
-  ;; is that state mask from an X event.
-  (cond ((logtest +right-button-mask+ mask)
-         +pointer-right-button+)
-        ((logtest +middle-button-mask+ mask)
-         +pointer-middle-button+)
-        ((logtest +left-button-mask+ mask)
-         +pointer-left-button+)
-        ((logtest +wheel-up-mask+ mask)
-         +pointer-wheel-up+)
-        ((logtest +wheel-down-mask+ mask)
-         +pointer-wheel-down+)
-        (t 0)))
 
 (defmethod port-modifier-state ((port clx-basic-port))
   (multiple-value-bind (x y same-screen-p child mask)
       (xlib:query-pointer (clx-port-window port))
     (declare (ignore x y same-screen-p child))
     (clim-xcommon:x-event-state-modifiers port mask)))
-
-(defmethod synthesize-pointer-motion-event ((pointer clx-basic-pointer))
-  (when-let* ((port (port pointer))
-              ;; XXX Should we rely on pointer-sheet being correct? -- moore
-              (sheet (pointer-sheet pointer))
-              (ancestor (sheet-mirrored-ancestor sheet))
-              (mirror (sheet-direct-mirror ancestor)))
-    (multiple-value-bind (x y same-screen-p child mask root-x root-y)
-        (xlib:query-pointer (window mirror))
-      (declare (ignore child))
-      (when same-screen-p
-        (multiple-value-bind (x y)
-            (if (eq sheet ancestor)
-                (values x y)
-                (untransform-position (sheet-native-transformation sheet) x y))
-          (make-instance 'pointer-motion-event
-                         :pointer pointer :button (button-from-state mask)
-                         :x x :y y :graft-x root-x :graft-y root-y
-                         :sheet sheet
-                         :modifier-state (clim-xcommon:x-event-state-modifiers
-                                          port mask)))))))
 
 (defmethod port-grab-pointer ((port clx-basic-port) pointer sheet
                               &key multiple-window)
@@ -408,57 +357,3 @@
 (defmethod port-ungrab-pointer ((port clx-basic-port) pointer sheet)
   (declare (ignore pointer sheet))
   (xlib:ungrab-pointer (clx-port-display port)))
-
-;;; Modifier cache support
-
-;;; Recall that XLIB:MODIFIER-MAPPING returns 8 values.  Each value is
-;;; a list of keycodes (in some arbitrary order) that are currently
-;;; used to mean a particular modifier.  Each value as the following
-;;; meaning:
-;;;
-;;;   value number  meaning
-;;;        0        shift keycodes
-;;;        1        lock keycodes
-;;;        2        control keycodes
-;;;        3        mod1 keycodes
-;;;        4        mod2 keycodes
-;;;        5        mod3 keycodes
-;;;        6        mod4 keycodes
-;;;        7        mod5 keycodes
-;;;
-;;; The problem here is that a keycode can be a member of more than
-;;; one list.  For example, if you turn your caps lock key into an
-;;; additional control key, then the keycode for the caps lock key may
-;;; very well be a member both of the list in value 1 and the list in
-;;; value 2.
-;;;
-;;; Let us take the case of caps lock.  The X11 programming manual
-;;; tells us that lock modifier is interpreted as caps lock when the
-;;; keysym named :CAPS-LOCK (as used by CLX) is attached to some
-;;; keycode and that keycode is also attached (as determined by
-;;; XLIB:MODIFIER-MAPPING) to the lock modifier, i.e., that keycode is
-;;; a member of the list in value 1.  The converse seems to be untrue,
-;;; though.  Just because someone pressed a key that satisfies those
-;;; criteria does not mean that the X11 server will switch on the lock
-;;; modifier next time a key is pressed.  It is unclear what the
-;;; criteria the X11 server uses.  But for our purpose it is important
-;;; to start by checking the lock modifier first.
-
-;;; This method creates a modifier mapping that is similar in spirit
-;;; to the one returned by XLIB:MODIFIER-MAPPING.  It differs from the
-;;; XLIB function in two ways.  First it returns a vector of length 8
-;;; rather than 8 different values.  Second, each element of the
-;;; vector is a list of keysym names rather than of keycodes.  Recall
-;;; that a keysym name is a Common Lisp symbol in the KEYWORD package.
-(defmethod clim-xcommon:modifier-mapping ((port clx-basic-port))
-  (let* ((display (clx-port-display port))
-         (x-modifiers (multiple-value-list (xlib:modifier-mapping display)))
-         (modifier-map (make-array (length x-modifiers) :initial-element nil)))
-    (loop
-       for keycodes in x-modifiers
-       for i from 0
-       do (setf (aref modifier-map i)
-                (mapcan (lambda (keycode)
-                          (modifier-keycode->keysyms display keycode))
-                        keycodes)))
-    modifier-map))

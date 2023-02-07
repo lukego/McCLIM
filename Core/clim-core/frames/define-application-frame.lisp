@@ -26,20 +26,27 @@
               (inner-pane (find-pane-of-type pane pane-class)))
     (when-let ((parent (sheet-parent inner-pane)))
       (sheet-disown-child parent inner-pane))
-    (if (member type '(:application :interactor :pointer-documentation :command-menu))
-        (multiple-value-bind (stream-options wrapper-options wrapper-space)
-            (separate-stream-pane-initargs
-             (if (intersection initargs '(:scroll-bar :scroll-bars))
-                 initargs
-                 (list* :scroll-bars (ecase type
-                                       (:interactor :vertical)
-                                       (:application t)
-                                       (:pointer-documentation nil)
-                                       (:command-menu t))
-                        initargs)))
-          (apply #'reinitialize-instance inner-pane stream-options)
-          (apply #'wrap-stream-pane inner-pane wrapper-space wrapper-options))
-        (apply #'reinitialize-instance inner-pane initargs))))
+    (cond
+      ((member type '(:application :interactor :pointer-documentation :command-menu))
+       (multiple-value-bind (pane-options wrapper-options wrapper-space)
+           (separate-clim-pane-initargs
+            (if (intersection initargs '(:scroll-bar :scroll-bars))
+                initargs
+                (list* :scroll-bars (ecase type
+                                      (:interactor :vertical)
+                                      (:application t)
+                                      (:pointer-documentation nil)
+                                      (:command-menu t))
+                       initargs)))
+         (setf inner-pane (apply #'reinitialize-pane inner-pane pane-options))
+         (apply #'wrap-stream-pane inner-pane wrapper-space wrapper-options)))
+      ((keywordp type)
+       (multiple-value-bind (pane-options wrapper-options wrapper-space)
+           (separate-clim-pane-initargs initargs)
+         (setf inner-pane (apply #'reinitialize-pane inner-pane pane-options))
+         (apply #'wrap-clim-pane inner-pane wrapper-space wrapper-options)))
+      (t
+       (apply #'reinitialize-pane inner-pane initargs)))))
 
 (defun generate-make-pane (name type options)
   (cond
@@ -55,6 +62,9 @@
      `(make-clim-pointer-documentation-pane :name ',name ,@options))
     ((eq type :command-menu)
      `(make-clim-command-menu-pane :name ',name ,@options))
+    #+ (or) ;; :LABEL conflicts with :PUSH-BUTTON initarg.
+    ((keywordp type)
+     `(make-clim-pane ',type :name ',name ,@options))
     ;; Non-standard pane designator passed to the `make-pane'
     (t
      `(make-pane ',type :name ',name ,@options))))
